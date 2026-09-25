@@ -7,6 +7,7 @@
 
 import socket
 import sys
+import time
 
 HOST = "localhost"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
@@ -147,8 +148,82 @@ def main():
                           status == 200 and text == "9", f"-> {status} {text}")
     sock.close()
 
+    failures += hardening()
+
     print(f"\n{'all green' if not failures else str(failures) + ' failing'}")
     return 1 if failures else 0
+
+
+def hardening():
+    """The cases that are not about arithmetic, but about not being lied to."""
+    failures = 0
+    print("\nhardening")
+
+    # Content-Length and Transfer-Encoding together: two framings, one stream.
+    # Answering it at all lets a smuggled request ride in behind the body.
+    sock = socket.create_connection((HOST, PORT))
+    reader = Reader(sock)
+    sock.sendall(
+        b"POST /add HTTP/1.1\r\nHost: x\r\nContent-Length: 6\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+        b"GET /mul?a=9&b=9 HTTP/1.1\r\nHost: x\r\n\r\n"
+    )
+    status, _, _ = reader.read_response()
+    failures += not check("CL + TE rejected", status == 400, f"-> {status}")
+    failures += not check("no smuggled request answered", sock.recv(400) == b"")
+    sock.close()
+
+    sock = socket.create_connection((HOST, PORT))
+    reader = Reader(sock)
+    sock.sendall(b"GET /add?a=2&b=3 HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n")
+    status, _, _ = reader.read_response()
+    failures += not check("duplicate Host rejected", status == 400, f"-> {status}")
+    sock.close()
+
+    body = b"9999"
+    sock = socket.create_connection((HOST, PORT))
+    reader = Reader(sock)
+    sock.sendall(
+        b"POST /add HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n"
+        b"Expect: 100-continue\r\n\r\n"
+    )
+    sock.settimeout(5)
+    status, _, _ = reader.read_response()
+    failures += not check("Expect gets 100 Continue", status == 100, f"-> {status}")
+    sock.sendall(body)
+    status, _, _ = reader.read_response()
+    failures += not check("then the real response", status == 405, f"-> {status}")
+    sock.close()
+
+    # A socket timeout only bounds the gap between packets, which a slow client
+    # can reset forever. The request as a whole needs its own deadline.
+    sock = socket.create_connection((HOST, PORT))
+    sock.sendall(b"GET /add?a=2&b=3 HTTP/1.1\r\nHost: x\r\n")
+    start = time.time()
+    sock.settimeout(40)
+    try:
+        while time.time() - start < 35:
+            time.sleep(2)
+            sock.sendall(b"X-Pad: y\r\n")
+        held = None
+    except OSError:
+        held = time.time() - start
+    failures += not check("slow drip cut off", held is not None,
+                          f"held {held:.0f}s" if held else "still open after 35s")
+    sock.close()
+
+    socks = [socket.create_connection((HOST, PORT)) for _ in range(65)]
+    refused = 0
+    for s in socks:
+        s.sendall(b"GET /add?a=1&b=1 HTTP/1.1\r\nHost: x\r\n\r\n")
+    for s in socks:
+        s.settimeout(5)
+        if b" 503 " in s.recv(200):
+            refused += 1
+        s.close()
+    failures += not check("connection ceiling enforced", refused >= 1,
+                          f"{refused} refused with 503")
+    return failures
 
 
 if __name__ == "__main__":

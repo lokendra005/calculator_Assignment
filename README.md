@@ -79,10 +79,18 @@ the socket is shut down after it. HTTP/1.0 requests are closed by default unless
 they ask for `keep-alive`. Everything else gets `Connection: keep-alive` and
 stays up.
 
-**Idle timeout.** A quiet connection is reaped after 30 seconds
-(`Keep-Alive: timeout=30` advertises it). A connection that goes quiet
-*mid-request* — headers started, never finished — gets a 408 first, because there
-the server has something to complain about.
+**Two clocks, not one.** A socket timeout only bounds the gap between two
+packets, and a slow client can reset it forever by dribbling a byte every 29
+seconds. So `Stream` keeps an absolute deadline instead: a connection may idle
+30 seconds waiting for its next request (`Keep-Alive: timeout=30` advertises
+it), but once the first byte of a request lands, the whole request has 10
+seconds to arrive. Miss the second deadline and the answer is 408; miss the
+first and the connection is simply closed, because a client that never started
+talking has nothing to be told.
+
+**Expect: 100-continue.** Honoured — the interim `100 Continue` goes out before
+the body is read, so a client that waits for it is not left hanging. Any other
+expectation is a 417.
 
 **Errors keep the line open.** 400, 404 and 405 are answers, not accidents, so
 the connection survives them. Only a stream the server can no longer trust — a
@@ -90,9 +98,24 @@ malformed request line, a bad chunk size, a `Content-Length` that isn't a
 number — closes the connection, because at that point it has no idea where the
 next request would start.
 
-**Limits.** 8 KB of headers and 1 MB of body, answered with 431 and 413. A
-persistent connection will read whatever you send it for as long as you like,
-which is only a feature if there is a ceiling.
+**One framing per request.** `Content-Length` and `Transfer-Encoding` arriving
+together is a 400, not a preference to resolve. If the server picks one and a
+proxy ahead of it picks the other, they disagree about where the request ends,
+and the bytes in the gap become a request nobody authorised — the server would
+happily answer a `GET` smuggled in behind a body. The same reasoning makes a
+second `Host`, `Content-Length` or `Transfer-Encoding` header a 400 rather than
+a comma-joined list: for headers that decide framing or routing, a duplicate is
+an ambiguity, not a value.
+
+**Limits.** 8 KB of headers, 1 MB of body and 64 concurrent connections,
+answered with 431, 413 and 503. A persistent connection is held open by
+definition, so without a ceiling a handful of idle clients would own every
+thread.
+
+**Closing.** `shutdown(SHUT_WR)` and then drain, rather than closing outright.
+Slamming the socket shut while the peer still has bytes in flight makes the
+kernel answer them with RST, which can throw away a response the client had not
+read yet.
 
 ## Files
 
