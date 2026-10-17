@@ -22,6 +22,7 @@ from urllib.parse import urlsplit, parse_qs
 
 HOST = "::"  # dual-stack, so "localhost" answers on both ::1 and 127.0.0.1
 PORT = int(os.environ.get("PORT", "8080"))
+ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "0"))  # 0: serve probes on PORT only
 VERSION = os.environ.get("APP_VERSION", "dev")  # baked in at image build: the git sha
 
 IDLE_TIMEOUT = 30       # seconds a quiet connection may wait for its next request
@@ -30,6 +31,7 @@ WRITE_TIMEOUT = 10      # seconds to get a response out
 MAX_HEADER_BYTES = 8192
 MAX_BODY_BYTES = 1 << 20
 MAX_CONNECTIONS = 64
+ADMIN_CONNECTIONS = 8   # kubelet probes and Prometheus need only a few
 DRAIN_SECONDS = float(os.environ.get("DRAIN_SECONDS", "5"))  # keep serving after SIGTERM
 
 # Set on SIGTERM. Readiness fails so Kubernetes stops routing here, but the
@@ -507,13 +509,35 @@ def listen_socket(port):
         return listener, host
 
 
+def serve_admin(port):
+    """Probes and scrapes on their own port and their own connection budget.
+
+    Sharing the public port meant a flood of user connections got the probes
+    refused too: liveness failed, and kubelet restarted pods that were busy,
+    not broken, dropping every connection they held.
+    """
+    listener, _ = listen_socket(port)
+    slots = threading.BoundedSemaphore(ADMIN_CONNECTIONS)
+    while True:
+        sock, addr = listener.accept()
+        if not slots.acquire(blocking=False):
+            sock.close()
+            continue
+        threading.Thread(
+            target=run_connection, args=(sock, f"{addr[0]}:{addr[1]}", slots, False),
+            daemon=True,
+        ).start()
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     listener, host = listen_socket(port)
     slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+    if ADMIN_PORT:
+        threading.Thread(target=serve_admin, args=(ADMIN_PORT,), daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: DRAINING.set())
     listener.settimeout(1)  # wake up regularly to notice SIGTERM
-    log("listening", host=host, port=port)
+    log("listening", host=host, port=port, admin_port=ADMIN_PORT)
 
     stop_at = None
     try:
@@ -553,12 +577,14 @@ def main():
         listener.close()
 
 
-def run_connection(sock, peer, slots):
-    METRICS.connection(1)
+def run_connection(sock, peer, slots, counted=True):
+    if counted:  # the gauge tracks user connections against MAX_CONNECTIONS
+        METRICS.connection(1)
     try:
         serve_connection(sock, peer)
     finally:
-        METRICS.connection(-1)
+        if counted:
+            METRICS.connection(-1)
         slots.release()
 
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Drive the calculator the way it will be marked: one socket, every request.
 
-    python3 server.py &
-    python3 test_client.py
+    ADMIN_PORT=8081 python3 server.py &
+    python3 test_client.py 8080 8081
 """
 
 import socket
@@ -11,6 +11,7 @@ import time
 
 HOST = "localhost"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+ADMIN_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 
 CASES = [
     ("GET", "/add?a=2&b=3", 200, "5"),
@@ -255,9 +256,20 @@ def hardening():
         s.settimeout(5)
         if b" 503 " in s.recv(200):
             refused += 1
-        s.close()
     failures += not check("connection ceiling enforced", refused >= 1,
                           f"{refused} refused with 503")
+
+    # The bug this guards: probes shared the ceiling, so a flood made kubelet
+    # restart healthy pods. The admin port must answer while 8080 is full.
+    if ADMIN_PORT:
+        probe = socket.create_connection((HOST, ADMIN_PORT), timeout=5)
+        probe.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        status, _, _ = Reader(probe).read_response()
+        failures += not check("admin port answers while 8080 is full",
+                              status == 200, f"-> {status}")
+        probe.close()
+    for s in socks:
+        s.close()
     return failures
 
 

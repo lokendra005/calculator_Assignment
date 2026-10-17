@@ -1,5 +1,5 @@
-# The calculator is public on its one port and calls nothing, not even DNS.
-# So: ingress on 8080 only, and no egress at all. A compromised pod has
+# The calculator is public on 8080 and calls nothing, not even DNS. So: 8080
+# from anywhere, 8081 from monitoring only, and no egress at all. A compromised pod has
 # nowhere to go.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -15,3 +15,10 @@ spec:
   ingress:
     - ports:
         - {port: 8080, protocol: TCP}
+    # Admin port: only Prometheus. (kubelet probes come from the node and are
+    # not subject to NetworkPolicy.)
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}
+      ports:
+        - {port: 8081, protocol: TCP}

@@ -10,7 +10,7 @@ HELM_FLAGS = --namespace $(NS) --create-namespace --set image.tag=$(SHA) \
 .PHONY: test cluster monitoring deploy build-local status drift smoke rollback grafana prometheus down
 
 test:                       ## protocol + operations tests against a local process
-	python3 server.py 8099 & pid=$$!; sleep 1; python3 test_client.py 8099; rc=$$?; kill $$pid; exit $$rc
+	ADMIN_PORT=8098 python3 server.py 8099 & pid=$$!; sleep 1; python3 test_client.py 8099 8098; rc=$$?; kill $$pid; exit $$rc
 
 cluster:                    ## local kind cluster, NodePort 30080 mapped to localhost
 	kind create cluster --config deploy/kind.yaml

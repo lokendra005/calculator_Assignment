@@ -32,9 +32,9 @@ jobs:
         run: pipx run ruff check --select E9,F63,F7,F82 .
       - name: Protocol and operations tests
         run: |
-          python3 server.py 8080 > server.log 2>&1 &
+          ADMIN_PORT=8081 python3 server.py 8080 > server.log 2>&1 &
           timeout 10 sh -c 'until nc -z localhost 8080; do sleep 0.2; done'
-          python3 test_client.py
+          python3 test_client.py 8080 8081
       - if: failure()
         run: cat server.log
 
@@ -51,7 +51,7 @@ jobs:
           curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
           # monitoring.coreos.com CRDs have no built-in schema; skip only those.
           helm template calculator chart/calculator --set image.tag=ci --set monitoring.enabled=true \
-            | ./kubeconform -strict -summary -skip ServiceMonitor,PrometheusRule
+            | ./kubeconform -strict -summary -skip PodMonitor,PrometheusRule
       - name: Misconfiguration scan (Dockerfile, chart)
         env:
           TRIVY_HELM_SET: image.tag=ci # the chart refuses to render without one

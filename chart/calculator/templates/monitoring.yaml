@@ -1,6 +1,8 @@
 {{- if .Values.monitoring.enabled }}
+# PodMonitor, not ServiceMonitor: it scrapes the admin port on each pod, so
+# the public NodePort Service never exposes 8081.
 apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
+kind: PodMonitor
 metadata:
   name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
@@ -10,8 +12,8 @@ spec:
   selector:
     matchLabels:
       {{- include "calculator.labels" . | nindent 6 }}
-  endpoints:
-    - port: http
+  podMetricsEndpoints:
+    - port: admin
       path: /metrics
       interval: 15s
 ---
@@ -32,14 +34,15 @@ spec:
           expr: sum(rate(calc_requests_total{op=~"/add|/sub|/mul|/div|refused"}[5m]))
         - record: calc:errors:ratio5m
           expr: |
-            sum(rate(calc_requests_total{op=~"/add|/sub|/mul|/div|refused",status=~"5.."}[5m]))
+            # "or vector(0)": no 5xx at all is a 0% ratio, not missing data.
+            (sum(rate(calc_requests_total{op=~"/add|/sub|/mul|/div|refused",status=~"5.."}[5m])) or vector(0))
             / clamp_min(calc:requests:rate5m, 1e-9)
         - record: calc:latency:p95_5m
           expr: |
             histogram_quantile(0.95,
               sum by (le) (rate(calc_request_duration_seconds_bucket{op=~"/add|/sub|/mul|/div"}[5m])))
         - alert: CalculatorDown
-          expr: sum(up{service="{{ .Release.Name }}"}) < 1 or absent(up{service="{{ .Release.Name }}"})
+          expr: sum(up{namespace="{{ .Release.Namespace }}",pod=~"{{ .Release.Name }}-.*"}) < 1 or absent(up{namespace="{{ .Release.Namespace }}",pod=~"{{ .Release.Name }}-.*"})
           for: 1m
           labels: {severity: critical}
           annotations:

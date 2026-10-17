@@ -47,16 +47,19 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - {name: PORT, value: "8080"}
+            # Probes and scrapes get their own port so user load cannot starve them.
+            - {name: ADMIN_PORT, value: "8081"}
             - {name: DRAIN_SECONDS, value: {{ .Values.drainSeconds | quote }}}
             - {name: LOG_LEVEL, value: {{ .Values.logLevel | quote }}}
           ports:
             - {name: http, containerPort: 8080}
+            - {name: admin, containerPort: 8081}
           readinessProbe:
-            httpGet: {path: /readyz, port: http}
+            httpGet: {path: /readyz, port: admin}
             periodSeconds: 2
             failureThreshold: 1
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: admin}
             periodSeconds: 10
             failureThreshold: 3
           resources:
