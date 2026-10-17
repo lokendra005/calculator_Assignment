@@ -148,10 +148,45 @@ def main():
                           status == 200 and text == "9", f"-> {status} {text}")
     sock.close()
 
+    failures += operations()
     failures += hardening()
 
     print(f"\n{'all green' if not failures else str(failures) + ' failing'}")
     return 1 if failures else 0
+
+
+def operations():
+    """Probes, metrics and trace ids: what Kubernetes and Prometheus rely on."""
+    failures = 0
+    print("\noperations")
+    sock = socket.create_connection((HOST, PORT))
+    reader = Reader(sock)
+    for target, want in (("/healthz", "ok"), ("/readyz", "ready")):
+        sock.sendall(request_bytes("GET", target))
+        status, _, body = reader.read_response()
+        failures += not check(f"GET {target}", status == 200 and body == want, f"-> {status} {body}")
+
+    sock.sendall(request_bytes("GET", "/version"))
+    status, _, body = reader.read_response()
+    failures += not check("GET /version", status == 200 and body != "", f"-> {body}")
+
+    sock.sendall(request_bytes("GET", "/metrics"))
+    status, _, body = reader.read_response()
+    ok = status == 200 and 'calc_requests_total{op="/add",status="200"}' in body
+    failures += not check("GET /metrics counts requests", ok)
+
+    trace = "4bf92f3577b34da6a3ce929d0e0e4736"
+    sock.sendall(request_bytes("GET", "/add?a=1&b=2",
+                               extra=[f"traceparent: 00-{trace}-00f067aa0ba902b7-01"]))
+    status, headers, _ = reader.read_response()
+    ok = headers.get("traceresponse", "").startswith(f"00-{trace}-")
+    failures += not check("trace id carried through", ok, headers.get("traceresponse", ""))
+
+    sock.sendall(request_bytes("POST", "/healthz"))
+    status, _, _ = reader.read_response()
+    failures += not check("POST /healthz -> 405", status == 405, f"-> {status}")
+    sock.close()
+    return failures
 
 
 def hardening():

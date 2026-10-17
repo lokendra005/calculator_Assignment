@@ -10,6 +10,9 @@ The connection is persistent: one TCP handshake answers as many requests as the
 client cares to send, in order, and stays open until the client says otherwise.
 """
 
+import json
+import os
+import signal
 import socket
 import sys
 import threading
@@ -18,7 +21,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit, parse_qs
 
 HOST = "::"  # dual-stack, so "localhost" answers on both ::1 and 127.0.0.1
-PORT = 8080
+PORT = int(os.environ.get("PORT", "8080"))
+VERSION = os.environ.get("APP_VERSION", "dev")  # baked in at image build: the git sha
 
 IDLE_TIMEOUT = 30       # seconds a quiet connection may wait for its next request
 REQUEST_TIMEOUT = 10    # seconds one request has to arrive in full, start to finish
@@ -26,6 +30,11 @@ WRITE_TIMEOUT = 10      # seconds to get a response out
 MAX_HEADER_BYTES = 8192
 MAX_BODY_BYTES = 1 << 20
 MAX_CONNECTIONS = 64
+DRAIN_SECONDS = float(os.environ.get("DRAIN_SECONDS", "5"))  # keep serving after SIGTERM
+
+# Set on SIGTERM. Readiness fails so Kubernetes stops routing here, but the
+# listener stays open for DRAIN_SECONDS to answer whatever is already on its way.
+DRAINING = threading.Event()
 
 # Headers that change how the message is framed or routed. A second copy is not
 # a list to join, it is an ambiguity, and ambiguity is how requests get smuggled.
@@ -53,6 +62,90 @@ REASONS = {
 }
 
 CONTINUE = b"HTTP/1.1 100 Continue\r\n\r\n"
+
+
+class Metrics:
+    """Prometheus text exposition, by hand: a few series do not need a library."""
+
+    BUCKETS = (0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0)
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.requests = {}    # (op, status) -> count
+        self.latency = {}     # op -> [count per bucket..., sum, count]
+        self.connections = 0
+
+    def observe(self, op, status, seconds):
+        with self.lock:
+            key = (op, str(status))
+            self.requests[key] = self.requests.get(key, 0) + 1
+            h = self.latency.setdefault(op, [0] * len(self.BUCKETS) + [0.0, 0])
+            for i, le in enumerate(self.BUCKETS):
+                if seconds <= le:
+                    h[i] += 1
+            h[-2] += seconds
+            h[-1] += 1
+
+    def connection(self, delta):
+        with self.lock:
+            self.connections += delta
+
+    def render(self):
+        with self.lock:
+            out = [
+                "# HELP calc_build_info Running version.",
+                "# TYPE calc_build_info gauge",
+                f'calc_build_info{{version="{VERSION}"}} 1',
+                "# HELP calc_open_connections Connections currently held open.",
+                "# TYPE calc_open_connections gauge",
+                f"calc_open_connections {self.connections}",
+                "# HELP calc_requests_total Responses sent, by operation and status.",
+                "# TYPE calc_requests_total counter",
+            ]
+            for (op, status), n in sorted(self.requests.items()):
+                out.append(f'calc_requests_total{{op="{op}",status="{status}"}} {n}')
+            out += [
+                "# HELP calc_request_duration_seconds Time from parsed request to response sent.",
+                "# TYPE calc_request_duration_seconds histogram",
+            ]
+            for op, h in sorted(self.latency.items()):
+                for le, n in zip(self.BUCKETS, h):
+                    out.append(f'calc_request_duration_seconds_bucket{{op="{op}",le="{le}"}} {n}')
+                out.append(f'calc_request_duration_seconds_bucket{{op="{op}",le="+Inf"}} {h[-1]}')
+                out.append(f'calc_request_duration_seconds_sum{{op="{op}"}} {h[-2]}')
+                out.append(f'calc_request_duration_seconds_count{{op="{op}"}} {h[-1]}')
+        return "\n".join(out)
+
+
+METRICS = Metrics()
+
+# Operational endpoints, answered like any other GET. Liveness only says the
+# process can still serve; readiness also says it wants new traffic.
+ADMIN = {
+    "/healthz": lambda: (200, "ok"),
+    "/readyz": lambda: (503, "draining") if DRAINING.is_set() else (200, "ready"),
+    "/version": lambda: (200, VERSION),
+    "/metrics": lambda: (200, METRICS.render()),
+}
+
+
+def op_label(target):
+    """Metric label for a target, bounded to known paths so cardinality stays fixed."""
+    path = urlsplit(target).path.rstrip("/") or "/"
+    return path if path in OPS or path in ADMIN else "other"
+
+
+def trace_context(request):
+    """W3C traceparent: join the caller's trace if it sent one, else start one.
+
+    ponytail: ids are logged and echoed, not exported. One service has no spans
+    to stitch together; add an OpenTelemetry exporter when a second hop exists.
+    """
+    parts = (request.header("traceparent") or "").split("-")
+    trace_id = parts[1] if len(parts) == 4 else ""
+    if len(trace_id) != 32 or trace_id.strip("0123456789abcdef") or trace_id == "0" * 32:
+        trace_id = os.urandom(16).hex()
+    return trace_id, os.urandom(8).hex()
 
 
 class BadRequest(Exception):
@@ -271,10 +364,12 @@ def handle(request):
     url = urlsplit(request.target)
     path = url.path.rstrip("/") or "/"
 
-    if path not in OPS:
+    if path not in OPS and path not in ADMIN:
         return 404, f"no such operation: {path}"
     if request.method != "GET":
         return 405, f"{request.method} not allowed"
+    if path in ADMIN:
+        return ADMIN[path]()
 
     params = parse_qs(url.query, keep_blank_values=True)
     values = []
@@ -294,7 +389,7 @@ def handle(request):
     return 200, format_number(OPS[path](a, b))
 
 
-def build_response(status, text, close, allow_header=False):
+def build_response(status, text, close, allow_header=False, extra=()):
     body = (text + "\n").encode()
     lines = [
         f"HTTP/1.1 {status} {REASONS.get(status, 'Error')}",
@@ -307,6 +402,7 @@ def build_response(status, text, close, allow_header=False):
         lines.append(f"Keep-Alive: timeout={IDLE_TIMEOUT}")
     if allow_header:
         lines.append("Allow: GET")
+    lines.extend(extra)
     return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
 
 
@@ -343,28 +439,50 @@ def serve_connection(sock, peer):
             except BadRequest as err:
                 sock.settimeout(WRITE_TIMEOUT)
                 sock.sendall(build_response(err.status, str(err), True))
+                METRICS.observe("invalid", err.status, 0)
+                log("rejected", level="warn", peer=peer, status=err.status, error=str(err))
                 break
 
             if request is None:
                 break
 
+            started = time.monotonic()
+            trace_id, span_id = trace_context(request)
             status, text = handle(request)
-            close = request.wants_close()
+            # While draining, ask keep-alive clients to reconnect, which lands
+            # them on a pod that is still ready.
+            close = request.wants_close() or DRAINING.is_set()
             sock.settimeout(WRITE_TIMEOUT)
-            sock.sendall(build_response(status, text, close, allow_header=status == 405))
+            sock.sendall(build_response(
+                status, text, close, allow_header=status == 405,
+                extra=[f"traceresponse: 00-{trace_id}-{span_id}-01"],
+            ))
             served += 1
-            log(f"{peer} {request.method} {request.target} -> {status}")
+            elapsed = time.monotonic() - started
+            op = op_label(request.target)
+            METRICS.observe(op, status, elapsed)
+            if op not in ADMIN:  # probes and scrapes every few seconds are noise
+                log("request", peer=peer, method=request.method, op=op, status=status,
+                    ms=round(elapsed * 1000, 3), trace_id=trace_id, span_id=span_id)
             if close:
                 break
     except OSError:  # includes socket.timeout on the write side
         pass
     finally:
         polite_close(sock)
-        log(f"{peer} closed after {served} request(s)")
+        log("closed", level="debug", peer=peer, served=served)
 
 
-def log(message):
-    print(f"[{http_date()}] {message}", flush=True)
+def log(message, level="info", **fields):
+    """One JSON object per line on stdout; the container runtime keeps the file."""
+    if level == "debug" and not DEBUG:
+        return
+    record = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+              "level": level, "msg": message, "version": VERSION, **fields}
+    print(json.dumps(record), flush=True)
+
+
+DEBUG = os.environ.get("LOG_LEVEL", "info") == "debug"
 
 
 def listen_socket(port):
@@ -393,25 +511,39 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     listener, host = listen_socket(port)
     slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
-    log(f"listening on {host}:{port}")
+    signal.signal(signal.SIGTERM, lambda *_: DRAINING.set())
+    listener.settimeout(1)  # wake up regularly to notice SIGTERM
+    log("listening", host=host, port=port)
 
+    stop_at = None
     try:
         while True:
-            sock, addr = listener.accept()
+            if DRAINING.is_set():
+                if stop_at is None:
+                    stop_at = time.monotonic() + DRAIN_SECONDS
+                    log("draining", seconds=DRAIN_SECONDS)
+                elif time.monotonic() >= stop_at:
+                    log("drained, exiting")
+                    break
+            try:
+                sock, addr = listener.accept()
+            except socket.timeout:
+                continue
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             peer = f"{addr[0]}:{addr[1]}"
 
             # Persistent connections are held open by definition, so without a
             # ceiling a handful of idle clients could hold every thread.
             if not slots.acquire(blocking=False):
-                log(f"{peer} refused: {MAX_CONNECTIONS} connections already open")
+                log("refused", level="warn", peer=peer, limit=MAX_CONNECTIONS)
+                METRICS.observe("refused", 503, 0)
                 try:
                     sock.sendall(build_response(503, "too many connections", True))
                 finally:
                     sock.close()
                 continue
 
-            log(f"{peer} connected")
+            log("connected", level="debug", peer=peer)
             threading.Thread(
                 target=run_connection, args=(sock, peer, slots), daemon=True
             ).start()
@@ -422,9 +554,11 @@ def main():
 
 
 def run_connection(sock, peer, slots):
+    METRICS.connection(1)
     try:
         serve_connection(sock, peer)
     finally:
+        METRICS.connection(-1)
         slots.release()
 
 
