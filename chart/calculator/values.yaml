@@ -1,0 +1,28 @@
+image:
+  repository: ghcr.io/lokendra005/calculator
+  # Always a git sha, set by CI or `make deploy`. Never latest: the tag is how
+  # a running pod is traced back to the commit that built it.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Two replicas so a rolling update or a pod failure never leaves zero.
+replicas: 2
+
+service:
+  type: NodePort
+  port: 80
+  nodePort: 30080
+
+drainSeconds: 5
+logLevel: info
+
+resources:
+  requests: {cpu: 50m, memory: 32Mi}
+  # No CPU limit: throttling a latency-sensitive server hurts more than it
+  # protects on a single-tenant cluster. Memory is capped so a leak gets
+  # OOM-killed and restarted instead of starving the node.
+  limits: {memory: 128Mi}
+
+monitoring:
+  # Needs the Prometheus Operator CRDs (deploy/monitoring.yaml).
+  enabled: false

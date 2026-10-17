@@ -1,0 +1,11 @@
+# Voluntary disruptions (node drain, cluster upgrade) leave one pod serving.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "calculator.labels" . | nindent 6 }}

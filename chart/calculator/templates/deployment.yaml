@@ -1,0 +1,67 @@
+{{- if not .Values.image.tag }}{{ fail "image.tag is required (a git sha)" }}{{ end }}
+# Stateless: every request is self-contained arithmetic, so a Deployment, not a
+# StatefulSet, and no volumes. Any replica can answer any request.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "calculator.labels" . | nindent 4 }}
+    app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+spec:
+  replicas: {{ .Values.replicas }}
+  revisionHistoryLimit: 5
+  # Surge one new pod, never drop below the desired count. A new pod must stay
+  # ready for minReadySeconds before an old one is removed.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  minReadySeconds: 5
+  selector:
+    matchLabels:
+      {{- include "calculator.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "calculator.labels" . | nindent 8 }}
+        app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+    spec:
+      automountServiceAccountToken: false  # it never talks to the API server
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway  # one-node kind still schedules
+          labelSelector:
+            matchLabels:
+              {{- include "calculator.labels" . | nindent 14 }}
+      containers:
+        - name: calculator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - {name: PORT, value: "8080"}
+            - {name: DRAIN_SECONDS, value: {{ .Values.drainSeconds | quote }}}
+            - {name: LOG_LEVEL, value: {{ .Values.logLevel | quote }}}
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 1
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
