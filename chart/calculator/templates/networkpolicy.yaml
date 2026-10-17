@@ -10,8 +10,8 @@ spec:
   podSelector:
     matchLabels:
       {{- include "calculator.labels" . | nindent 6 }}
+  # Egress listed with no egress rules = deny all egress.
   policyTypes: [Ingress, Egress]
   ingress:
     - ports:
         - {port: 8080, protocol: TCP}
-  egress: []

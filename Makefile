@@ -7,7 +7,7 @@ URL   ?= http://localhost:30080
 HELM_FLAGS = --namespace $(NS) --create-namespace --set image.tag=$(SHA) \
              --set monitoring.enabled=true --wait --rollback-on-failure --timeout 3m
 
-.PHONY: test cluster monitoring deploy build-local status smoke rollback grafana prometheus down
+.PHONY: test cluster monitoring deploy build-local status drift smoke rollback grafana prometheus down
 
 test:                       ## protocol + operations tests against a local process
 	python3 server.py 8099 & pid=$$!; sleep 1; python3 test_client.py 8099; rc=$$?; kill $$pid; exit $$rc
@@ -36,6 +36,11 @@ status:                     ## which commit is serving, and the release history
 	@curl -fsS $(URL)/version; echo
 	@kubectl -n $(NS) get deploy calculator -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 	@helm -n $(NS) history calculator --max 5
+
+drift:                      ## live objects vs what the chart renders for the deployed sha; exit 1 = drift
+	helm template calculator chart/calculator --namespace $(NS) \
+	  --set image.tag=$$(helm -n $(NS) get values calculator -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["image"]["tag"])') \
+	  --set monitoring.enabled=true | kubectl diff -n $(NS) -f - && echo "no drift"
 
 smoke:
 	./deploy/smoke.sh $(URL)
