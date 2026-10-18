@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege by default; the one job that publishes asks for more.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/lokendra005/calculator
+  # On a pull_request, github.sha is a synthetic merge commit. Tag with the
+  # commit that was actually pushed so the image traces back to it.
+  SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to 26 on 2026-10-19
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13" # the interpreter in the distroless image
+      - name: Lint (syntax errors, undefined names)
+        run: pipx run ruff check --select E9,F63,F7,F82 .
+      - name: Protocol and operations tests
+        run: |
+          ADMIN_PORT=8081 python3 server.py 8080 > server.log 2>&1 &
+          timeout 10 sh -c 'until nc -z localhost 8080; do sleep 0.2; done'
+          python3 test_client.py 8080 8081
+      - if: failure()
+        run: cat server.log
+
+  config:
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to 26 on 2026-10-19
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.1 # --rollback-on-failure is Helm 4's name for --atomic
+      - name: Helm lint and schema check
+        run: |
+          helm lint chart/calculator --set image.tag=ci
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          # monitoring.coreos.com CRDs have no built-in schema; skip only those.
+          helm template calculator chart/calculator --set image.tag=ci --set monitoring.enabled=true \
+            | ./kubeconform -strict -summary -skip PodMonitor,PrometheusRule
+      - name: Misconfiguration scan (Dockerfile, chart)
+        env:
+          TRIVY_HELM_SET: image.tag=ci # the chart refuses to render without one
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  # Build once, scan, prove it on a real cluster, and only then publish. The
+  # image pushed is the exact one that passed.
+  release:
+    needs: [test, config]
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to 26 on 2026-10-19
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build
+        run: docker build --build-arg VERSION=$SHA -t $IMAGE:$SHA .
+      - name: Vulnerability scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ env.SHA }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.1 # --rollback-on-failure is Helm 4's name for --atomic
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          config: deploy/kind.yaml
+          cluster_name: calc
+      - name: Deploy to kind
+        run: |
+          kind load docker-image $IMAGE:$SHA --name calc
+          helm upgrade --install calculator chart/calculator \
+            --namespace calculator --create-namespace \
+            --set image.tag=$SHA --wait --rollback-on-failure --timeout 3m
+          kubectl get pods -n calculator -o wide
+      - name: Smoke test the user journey
+        run: ./deploy/smoke.sh http://localhost:30080 $SHA
+      - if: failure()
+        run: kubectl describe pods -n calculator; kubectl logs -n calculator -l app.kubernetes.io/name=calculator --tail=50
+      - name: Publish
+        # Forks get a read-only token; their PRs are tested but not published.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push $IMAGE:$SHA
+          echo "Published \`$IMAGE:$SHA\`" >> $GITHUB_STEP_SUMMARY

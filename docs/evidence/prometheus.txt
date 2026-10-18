@@ -1,0 +1,19 @@
+$ promql: calc_build_info
+   {'pod': 'calculator-5cbc68f484-fm94l', 'version': 'a7e33ef4d8bef2745f88303b8aa6c7e376a26d6b'} 1
+   {'pod': 'calculator-5cbc68f484-cgqdj', 'version': 'a7e33ef4d8bef2745f88303b8aa6c7e376a26d6b'} 1
+$ promql: up{namespace="calculator"}
+   {'pod': 'calculator-5cbc68f484-fm94l'} 1
+   {'pod': 'calculator-5cbc68f484-cgqdj'} 1
+$ promql: kube_deployment_status_replicas_available{deployment="calculator"}
+   {'deployment': 'calculator', 'pod': 'monitoring-kube-state-metrics-5c4b55584-lb4dv'} 2
+$ promql: calc:requests:rate5m
+   {} 14.044440766123374
+$ promql: calc:errors:ratio5m
+   {} 0.3961595974273715
+$ promql: calc:latency:p95_5m
+   {} 0.00095
+$ alerts (group calculator)
+   CalculatorDown inactive ok
+   CalculatorDegraded inactive ok
+   CalculatorErrorBudgetBurn firing ok
+   CalculatorSlow inactive ok

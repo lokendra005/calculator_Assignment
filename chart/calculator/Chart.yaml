@@ -1,0 +1,6 @@
+apiVersion: v2
+name: calculator
+description: HTTP/1.1 calculator served straight off a socket
+type: application
+version: 0.1.0
+appVersion: dev

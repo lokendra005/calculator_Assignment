@@ -1,0 +1,17 @@
+$ curl -i -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" "localhost:30080/mul?a=6&b=7"
+HTTP/1.1 200 OK
+Date: Sun, 18 Oct 2026 01:05:03 GMT
+Content-Type: text/plain; charset=utf-8
+Content-Length: 3
+Connection: keep-alive
+Keep-Alive: timeout=30
+traceresponse: 00-4bf92f3577b34da6a3ce929d0e0e4736-b90db27860893bda-01
+
+42
+
+$ kubectl -n calculator logs -l app.kubernetes.io/name=calculator --tail=2000 | grep 4bf92f3577b34da6a3ce929d0e0e4736
+{"ts": "2026-10-18T01:05:03.381+00:00", "level": "info", "msg": "request", "version": "a7e33ef4d8bef2745f88303b8aa6c7e376a26d6b", "peer": "::ffff:10.244.0.1:40240", "method": "GET", "op": "/mul", "status": 200, "ms": 0.616, "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "b90db27860893bda"}
+
+$ curl -s "localhost:30080/div?a=1&b=0"; curl -s "localhost:30080/pow?a=1&b=1"
+division by zero
+no such operation: /pow

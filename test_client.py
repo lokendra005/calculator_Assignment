@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Drive the calculator the way it will be marked: one socket, every request.
 
-    python3 server.py &
-    python3 test_client.py
+    ADMIN_PORT=8081 python3 server.py &
+    python3 test_client.py 8080 8081
 """
 
 import socket
@@ -11,6 +11,7 @@ import time
 
 HOST = "localhost"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+ADMIN_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 
 CASES = [
     ("GET", "/add?a=2&b=3", 200, "5"),
@@ -148,10 +149,45 @@ def main():
                           status == 200 and text == "9", f"-> {status} {text}")
     sock.close()
 
+    failures += operations()
     failures += hardening()
 
     print(f"\n{'all green' if not failures else str(failures) + ' failing'}")
     return 1 if failures else 0
+
+
+def operations():
+    """Probes, metrics and trace ids: what Kubernetes and Prometheus rely on."""
+    failures = 0
+    print("\noperations")
+    sock = socket.create_connection((HOST, PORT))
+    reader = Reader(sock)
+    for target, want in (("/healthz", "ok"), ("/readyz", "ready")):
+        sock.sendall(request_bytes("GET", target))
+        status, _, body = reader.read_response()
+        failures += not check(f"GET {target}", status == 200 and body == want, f"-> {status} {body}")
+
+    sock.sendall(request_bytes("GET", "/version"))
+    status, _, body = reader.read_response()
+    failures += not check("GET /version", status == 200 and body != "", f"-> {body}")
+
+    sock.sendall(request_bytes("GET", "/metrics"))
+    status, _, body = reader.read_response()
+    ok = status == 200 and 'calc_requests_total{op="/add",status="200"}' in body
+    failures += not check("GET /metrics counts requests", ok)
+
+    trace = "4bf92f3577b34da6a3ce929d0e0e4736"
+    sock.sendall(request_bytes("GET", "/add?a=1&b=2",
+                               extra=[f"traceparent: 00-{trace}-00f067aa0ba902b7-01"]))
+    status, headers, _ = reader.read_response()
+    ok = headers.get("traceresponse", "").startswith(f"00-{trace}-")
+    failures += not check("trace id carried through", ok, headers.get("traceresponse", ""))
+
+    sock.sendall(request_bytes("POST", "/healthz"))
+    status, _, _ = reader.read_response()
+    failures += not check("POST /healthz -> 405", status == 405, f"-> {status}")
+    sock.close()
+    return failures
 
 
 def hardening():
@@ -220,9 +256,20 @@ def hardening():
         s.settimeout(5)
         if b" 503 " in s.recv(200):
             refused += 1
-        s.close()
     failures += not check("connection ceiling enforced", refused >= 1,
                           f"{refused} refused with 503")
+
+    # The bug this guards: probes shared the ceiling, so a flood made kubelet
+    # restart healthy pods. The admin port must answer while 8080 is full.
+    if ADMIN_PORT:
+        probe = socket.create_connection((HOST, ADMIN_PORT), timeout=5)
+        probe.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        status, _, _ = Reader(probe).read_response()
+        failures += not check("admin port answers while 8080 is full",
+                              status == 200, f"-> {status}")
+        probe.close()
+    for s in socks:
+        s.close()
     return failures
 
 

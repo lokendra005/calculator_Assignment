@@ -1,0 +1,83 @@
+{{- if .Values.monitoring.enabled }}
+# PodMonitor, not ServiceMonitor: it scrapes the admin port on each pod, so
+# the public NodePort Service never exposes 8081.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "calculator.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "calculator.labels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: admin
+      path: /metrics
+      interval: 15s
+---
+# SLOs for user-facing arithmetic (/add /sub /mul /div):
+#   availability 99%: responses that are not 5xx. 4xx is the caller's mistake.
+#   latency: 95% of requests answered within 100 ms.
+# Every alert names the runbook section that says what to do.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+    - name: calculator
+      rules:
+        - record: calc:requests:rate5m
+          expr: sum(rate(calc_requests_total{op=~"/add|/sub|/mul|/div|refused"}[5m]))
+        - record: calc:errors:ratio5m
+          expr: |
+            # "or vector(0)": no 5xx at all is a 0% ratio, not missing data.
+            (sum(rate(calc_requests_total{op=~"/add|/sub|/mul|/div|refused",status=~"5.."}[5m])) or vector(0))
+            / clamp_min(calc:requests:rate5m, 1e-9)
+        - record: calc:latency:p95_5m
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(calc_request_duration_seconds_bucket{op=~"/add|/sub|/mul|/div"}[5m])))
+        - alert: CalculatorDown
+          expr: sum(up{namespace="{{ .Release.Namespace }}",pod=~"{{ .Release.Name }}-.*"}) < 1 or absent(up{namespace="{{ .Release.Namespace }}",pod=~"{{ .Release.Name }}-.*"})
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: No calculator pod is being scraped.
+            runbook: docs/RUNBOOK.md#calculatordown
+        - alert: CalculatorDegraded
+          expr: kube_deployment_status_replicas_available{deployment="{{ .Release.Name }}"} < {{ .Values.replicas }}
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: Fewer pods available than desired. One more failure is an outage.
+            runbook: docs/RUNBOOK.md#calculatordegraded
+        - alert: CalculatorErrorBudgetBurn
+          expr: calc:errors:ratio5m > 0.01
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "More than 1% of requests are failing with 5xx ({{`{{ $value | humanizePercentage }}`}})."
+            runbook: docs/RUNBOOK.md#calculatorerrorbudgetburn
+        - alert: CalculatorSlow
+          expr: calc:latency:p95_5m > 0.1
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "p95 latency above 100 ms ({{`{{ $value | humanizeDuration }}`}})."
+            runbook: docs/RUNBOOK.md#calculatorslow
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  calculator.json: |
+    {{- .Files.Get "dashboards/calculator.json" | nindent 4 }}
+{{- end }}

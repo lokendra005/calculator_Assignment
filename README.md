@@ -1,3 +1,81 @@
+# Calculator, operated
+
+A stdlib-only HTTP/1.1 calculator (the original project is described
+[below](#a-calculator-that-stays-on-the-line)), now built, tested, scanned,
+deployed to Kubernetes, and observed.
+
+- **Baseline:** [`35c6f47`](https://github.com/lokendra005/calculator_Assignment/tree/35c6f47522a3be930b3fb8c4389302b4bb68b9d8)
+  (tag `baseline`). That is the app as it was: `server.py`, `test_client.py` and this
+  README's second half. There was no container, CI, Kubernetes config, metrics, or health endpoints.
+- **Design decisions and trade-offs:** [docs/DECISIONS.md](docs/DECISIONS.md)
+- **Alerts → actions, failure drills:** [docs/RUNBOOK.md](docs/RUNBOOK.md)
+- **Evidence from real runs:** [docs/EVIDENCE.md](docs/EVIDENCE.md)
+
+## What was added
+
+| Area | Where |
+|---|---|
+| `/healthz` `/readyz` `/version` `/metrics` (probes and metrics on admin port 8081), JSON logs, W3C trace ids, graceful SIGTERM drain | `server.py` |
+| Distroless non-root image, version baked in | `Dockerfile` |
+| Helm chart: Deployment (2 replicas, probes, resources, hardened securityContext), NodePort Service, PDB, NetworkPolicy, PodMonitor, SLO alert rules, Grafana dashboard | `chart/calculator/` |
+| CI: lint, protocol tests, helm lint, kubeconform, Trivy config + image scans, deploy to kind, smoke test, then publish to GHCR | `.github/workflows/ci.yml` |
+| Local cluster, monitoring stack, deploy / rollback / drift / status targets | `Makefile`, `deploy/` |
+
+## Run it
+
+**Prerequisites:** Docker with **4 GB** of memory (at 2 GB the node OOMs once Grafana and Prometheus are running), `kind` ≥ 0.24, `kubectl`, `helm` 4,
+`make`, `curl`, Python 3. On macOS: `brew install kind helm kubectl`.
+
+```bash
+make cluster          # kind cluster "calc"; NodePort 30080 → localhost:30080
+make monitoring       # Prometheus + Grafana + kube-state-metrics (~3 min)
+make deploy           # deploys the CI-built image for HEAD: ghcr.io/lokendra005/calculator:<sha>
+                      #   or: make deploy SHA=<any commit CI has built>
+                      #   offline/dev: make build-local (builds HEAD on this machine)
+```
+
+`make deploy` ends with `deploy/smoke.sh`, which checks real arithmetic, an error
+case, and that `/version` equals the sha you asked for.
+
+**Access**
+
+| What | How |
+|---|---|
+| App | `curl "localhost:30080/add?a=2&b=3"`, `curl localhost:30080/version` |
+| Prometheus | `make prometheus` → http://localhost:9090 (alerts: `/alerts`) |
+| Grafana | `make grafana` prints the generated admin password → http://localhost:3000, user `admin`, dashboard "Calculator" |
+| Logs | `kubectl -n calculator logs -l app.kubernetes.io/name=calculator -f` |
+
+**Operate**
+
+```bash
+make status           # serving sha, image, helm history
+make drift            # live objects vs chart for the deployed sha (exit 1 = drift)
+make rollback         # previous revision, then smoke test
+make test             # protocol + ops tests against a local process (no cluster)
+python3 deploy/load.py 60   # steady traffic, reports every failed request
+make down             # delete the cluster
+```
+
+**Known limitations**
+
+- Single-node kind: a node failure is a full outage. The topology spread
+  constraint only matters on more nodes.
+- Deploying to the laptop cluster is a manual `make deploy`, because GitHub
+  cannot reach it. CI proves each image on an ephemeral kind cluster first.
+  See DECISIONS.md, "CI/CD and the automation boundary".
+- No Alertmanager: alerts evaluate and show as firing in Prometheus but are
+  not routed anywhere. No log aggregation (no Loki): logs are read with `kubectl logs`.
+- Tracing is trace-id propagation and log correlation, with no span export.
+  There is a single hop.
+- No TLS: plain HTTP on localhost.
+- One client holding many idle keep-alive connections can fill every pod's
+  64-connection ceiling, and everyone else then gets a 503. Saturation no
+  longer restarts pods, but capacity can still be monopolised. The fix is
+  described in RUNBOOK.md, "Drill: saturation".
+
+---
+
 # A calculator that stays on the line
 
 An HTTP/1.1 calculator written directly against a TCP socket. No framework, no

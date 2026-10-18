@@ -1,0 +1,4 @@
+REVISION	UPDATED                 	STATUS    	CHART           	APP VERSION	DESCRIPTION                                                                                                                
+1       	Sun Oct 18 06:22:58 2026	superseded	calculator-0.1.0	dev        	Install complete                                                                                                           
+2       	Sun Oct 18 06:32:23 2026	failed    	calculator-0.1.0	dev        	Upgrade "calculator" failed: resource Deployment/calculator/calculator not ready. status: InProgress, message: Updated: ...
+3       	Sun Oct 18 06:33:23 2026	deployed  	calculator-0.1.0	dev        	Rollback to 1                                                                                                              

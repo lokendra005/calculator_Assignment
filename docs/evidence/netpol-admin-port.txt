@@ -1,0 +1,3 @@
+default ns -> :8080/version = a7e33ef4d8bef2745f88303b8aa6c7e376a26d6b
+default ns -> :8081/healthz = blocked (timeout)
+wget: download timed out
