@@ -1,0 +1,2 @@
+deployment.apps/calculator restarted
+deployment "calculator" successfully rolled out

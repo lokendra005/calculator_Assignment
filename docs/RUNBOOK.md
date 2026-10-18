@@ -34,6 +34,9 @@ The only 5xx this server produces is the 503 for the connection ceiling
 3. Short term: `kubectl -n calculator scale deploy/calculator --replicas=4`. That
    is deliberate drift, which `make drift` will show; then record it in `values.yaml`.
 4. If one client is holding idle connections, that client is the problem. `IDLE_TIMEOUT` (30 s) frees them eventually.
+5. The pods should **not** be restarting. Probes use admin port 8081, which
+   saturation does not touch. If you do see restarts, check node memory first
+   (`kubectl get events -A | grep -i oom`).
 
 ## CalculatorSlow
 
@@ -58,6 +61,28 @@ This drill was run on the local cluster; its output is in [EVIDENCE.md](EVIDENCE
 - **Evidence:** load.py reports 0 failures. `helm history` shows the failed
   revision followed by an automatic rollback revision. `/version` never changes.
 - **Verify recovery:** `make status` shows the original sha, `make smoke` passes, and `make drift` reports no drift.
+
+## Drill: saturation (this drill found a bug)
+
+- **Symptom:** the error budget burn alert fires, and pods restart even though nothing is broken.
+- **Test:** hold about 150 idle connections against 2 × 64 slots for 7 minutes, with `deploy/load.py` running alongside.
+- **Before the fix** ([evidence](evidence/saturation-before-fix.txt)):
+  - The 5xx ratio reached 14–28% and `CalculatorErrorBudgetBurn` fired, as designed.
+  - kubelet's probes were refused by the same ceiling. Liveness failed, and
+    pods restarted 8 times, which reset every held connection.
+  - Result: 680 of 4530 requests failed: 482 got a 503, 195 got a connection reset, and 3 timed out.
+- **Hypothesis:** the probes compete with users for the connection slots.
+- **Change:** probes and metrics moved to admin port 8081, with their own budget.
+- **Verification** ([evidence](evidence/saturation-after-fix.txt)): the same
+  drill on `a7e33ef` gave 0 restarts, 0 resets, no probe failures, and
+  `calc_open_connections` held at exactly 64 per pod. The alert still fired,
+  which is correct. Once the hog stopped, the alert resolved and `smoke.sh`
+  passed.
+- **Left open:** with no restarts freeing slots, the hog held all 128 slots
+  and 98% of real requests got a 503. One client can take all the capacity.
+  The next change: at the ceiling, close the longest-idle keep-alive
+  connection instead of refusing the new one, and add per-client limits at an
+  ingress. Until then the response is step 3 above: scale out.
 
 ## Drill: pod failure
 

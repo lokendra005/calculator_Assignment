@@ -13,8 +13,8 @@ flowchart LR
   nodeport -->|kube-proxy, iptables| svc[Service calculator :80]
   svc -->|only Ready endpoints| p1[pod A :8080]
   svc --> p2[pod B :8080]
-  prom[Prometheus] -->|ServiceMonitor, /metrics every 15s| p1 & p2
-  kubelet -->|/healthz /readyz| p1 & p2
+  prom[Prometheus] -->|PodMonitor, :8081/metrics every 15s| p1 & p2
+  kubelet -->|:8081 /healthz /readyz| p1 & p2
   prom --> graf[Grafana dashboard]
   prom --> rules[PrometheusRule: SLO alerts]
 ```
@@ -27,13 +27,16 @@ flowchart LR
 3. `server.py` parses the request, computes the answer, writes one JSON log
    line containing the trace id, updates its counters, and keeps the TCP
    connection open for the next request (keep-alive).
-4. Prometheus scrapes `/metrics` on every pod. The recording rules turn the
-   scraped series into SLO ratios, and the alert rules evaluate those ratios.
+4. Prometheus scrapes `/metrics` on every pod, and kubelet probes it, on a
+   separate **admin port, 8081**. That port has its own budget of 8
+   connections and is not part of the public Service. The recording rules turn
+   the scraped series into SLO ratios, and the alert rules evaluate those
+   ratios.
 
 | Failure boundary | What contains it |
 |---|---|
 | One request is malformed or malicious | `BadRequest` closes only that connection. The framing rules (CL+TE, duplicate Host, size limits) stop request smuggling. |
-| One client holds connections open | `MAX_CONNECTIONS=64` per pod. Extra connections get a 503 and are counted as `op="refused"`, which feeds the error SLO. |
+| One client holds connections open | `MAX_CONNECTIONS=64` per pod. Extra connections get a 503 and are counted as `op="refused"`, which feeds the error SLO. Probes are on the admin port, so saturation cannot make kubelet restart a busy pod (see "Found by a drill" below). |
 | One process hangs or dies | The liveness probe restarts it. The second replica keeps serving in the meantime. |
 | A bad release | `maxUnavailable: 0` and readiness gating keep the old pods serving. `--rollback-on-failure` reverts the release automatically. |
 | A node drain | The PodDisruptionBudget (`minAvailable: 1`) blocks evicting the last pod. |
@@ -57,6 +60,20 @@ limitation of a laptop cluster. On a multi-node cluster, the
   (readiness) asks "does it want traffic?". Readiness turns false during
   shutdown, while liveness stays true, so draining never looks like a crash. No
   startup probe: the server binds in well under a second.
+- **Probes and metrics on their own port (found by a drill).** At first the
+  probes shared port 8080 and its 64-connection ceiling. A saturation drill
+  (`docs/evidence/saturation-before-fix.txt`) showed the cascade. The probes
+  were refused with 503, liveness failed, and kubelet restarted busy but
+  healthy pods 8 times. Every held connection was reset, so 195 of the 680
+  user failures were resets on top of the 503s. The fix is `ADMIN_PORT=8081`,
+  a separate listener with its own small budget, scraped by a PodMonitor and
+  reachable only from the `monitoring` namespace. `test_client.py` now fills
+  8080 and asserts that 8081 still answers. The pod stays Ready while it is
+  saturated, on purpose. If "full" counted as unready, then when every pod was
+  full the Service would have no endpoints at all, which turns partial 503s
+  into a total outage. The same drill then showed the remaining gap: one
+  client holding idle connections can fill all 128 slots. Evicting the
+  longest-idle connection at the ceiling would close it (see the runbook).
 - **Graceful drain.** On SIGTERM the server sets `DRAINING`. Readiness then
   fails, every response carries `Connection: close` so keep-alive clients
   reconnect to a ready pod, and the listener keeps accepting for
@@ -187,7 +204,7 @@ operator ─► make deploy SHA=<sha> ─► docker pull ─► kind load ─►
 |---|---|
 | Image | Distroless Debian 13: Python and nothing else, with no shell or package manager. It runs as uid 65532. Trivy fails the build on fixable HIGH/CRITICAL CVEs. The Debian 12 base was rejected because it had 43 fixable HIGH CVEs. |
 | Pod | `runAsNonRoot`, read-only root filesystem, `allowPrivilegeEscalation: false`, `capabilities: drop [ALL]`, `seccomp: RuntimeDefault`, no ServiceAccount token mounted. |
-| Network | NetworkPolicy allows ingress only on 8080 and denies all egress (the app needs no DNS and no outbound calls). Verified: `create_connection(1.1.1.1:443)` times out from inside the pod. |
+| Network | NetworkPolicy allows ingress on 8080 from anywhere, on 8081 (admin) only from the `monitoring` namespace, and denies all egress (the app needs no DNS and no outbound calls). Verified: `create_connection(1.1.1.1:443)` times out from inside the pod, and a pod in `default` reaches 8080 but times out on 8081. |
 | Exposure | Only the NodePort is reachable from outside, and only on localhost. Prometheus and Grafana are reachable only through `kubectl port-forward`. |
 | CI permissions | `contents: read` by default. Only the release job gets `packages: write`, and it uses the short-lived `GITHUB_TOKEN`, so no personal access token is stored. Pull requests from forks are tested but never published. |
 | Secrets | The app has none. The Grafana admin password is generated by its chart into a Kubernetes Secret and is never committed. The GHCR pull uses the operator's local `docker login`, so there is no pull secret in the cluster. |

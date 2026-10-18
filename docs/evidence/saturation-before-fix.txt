@@ -1,0 +1,58 @@
+# Drill: hold ~150 idle connections (2 pods x 64 ceiling) + steady load, 7 min. Before the fix.
+$ kubectl -n calculator get pods
+NAME                          READY   STATUS    RESTARTS      AGE
+calculator-59ffff7d99-p5rp5   1/1     Running   2 (15s ago)   5m22s
+calculator-59ffff7d99-ppcgv   1/1     Running   1 (65s ago)   7m43s
+
+$ kubectl -n calculator get events | grep probe/Killing
+15m         Warning   Unhealthy           pod/calculator-86d6fcd98d-kgwzh    Readiness probe failed: Get "http://10.244.0.11:8080/readyz": dial tcp 10.244.0.11:8080: connect: connection refused
+15m         Warning   Unhealthy           pod/calculator-86d6fcd98d-chkj2    Readiness probe failed: Get "http://10.244.0.12:8080/readyz": dial tcp 10.244.0.12:8080: connect: connection refused
+13m         Warning   Unhealthy           pod/calculator-574d987cdc-g999p    Readiness probe failed: Get "http://10.244.0.13:8080/readyz": dial tcp 10.244.0.13:8080: connect: connection refused
+13m         Warning   Unhealthy           pod/calculator-574d987cdc-r7ftj    Readiness probe failed: Get "http://10.244.0.14:8080/readyz": dial tcp 10.244.0.14:8080: connect: connection refused
+13m         Normal    Killing             pod/calculator-86d6fcd98d-chkj2    Stopping container calculator
+13m         Normal    Killing             pod/calculator-86d6fcd98d-kgwzh    Stopping container calculator
+13m         Warning   Unhealthy           pod/calculator-86d6fcd98d-chkj2    Readiness probe failed: HTTP probe failed with statuscode: 503
+13m         Warning   Unhealthy           pod/calculator-86d6fcd98d-kgwzh    Readiness probe failed: HTTP probe failed with statuscode: 503
+13m         Warning   Unhealthy           pod/calculator-59649d5755-58426    Readiness probe failed: Get "http://10.244.0.15:8080/readyz": dial tcp 10.244.0.15:8080: connect: connection refused
+13m         Normal    Killing             pod/calculator-574d987cdc-r7ftj    Stopping container calculator
+13m         Warning   Unhealthy           pod/calculator-59649d5755-6cz4n    Readiness probe failed: Get "http://10.244.0.16:8080/readyz": dial tcp 10.244.0.16:8080: connect: connection refused
+12m         Warning   Unhealthy           pod/calculator-574d987cdc-r7ftj    Readiness probe failed: HTTP probe failed with statuscode: 503
+12m         Normal    Killing             pod/calculator-574d987cdc-g999p    Stopping container calculator
+12m         Warning   Unhealthy           pod/calculator-574d987cdc-g999p    Readiness probe failed: HTTP probe failed with statuscode: 503
+12m         Normal    Killing             pod/calculator-59649d5755-zcdzf    Stopping container calculator
+7m42s       Warning   Unhealthy           pod/calculator-59ffff7d99-ppcgv    Readiness probe failed: Get "http://10.244.0.18:8080/readyz": dial tcp 10.244.0.18:8080: connect: connection refused
+7m35s       Warning   Unhealthy           pod/calculator-59ffff7d99-c98m7    Readiness probe failed: Get "http://10.244.0.19:8080/readyz": dial tcp 10.244.0.19:8080: connect: connection refused
+7m35s       Normal    Killing             pod/calculator-59649d5755-58426    Stopping container calculator
+7m30s       Normal    Killing             pod/calculator-59649d5755-6cz4n    Stopping container calculator
+7m29s       Warning   Unhealthy           pod/calculator-59649d5755-58426    Readiness probe failed: HTTP probe failed with statuscode: 503
+7m25s       Warning   Unhealthy           pod/calculator-59649d5755-6cz4n    Readiness probe failed: HTTP probe failed with statuscode: 503
+5m22s       Normal    Killing             pod/calculator-59ffff7d99-c98m7    Stopping container calculator
+5m21s       Warning   Unhealthy           pod/calculator-59ffff7d99-c98m7    Readiness probe failed: HTTP probe failed with statuscode: 503
+2m14s       Warning   Unhealthy           pod/calculator-59ffff7d99-ppcgv    Readiness probe failed: Get "http://10.244.0.18:8080/readyz": readLoopPeekFailLocked: %!w(<nil>)
+2m12s       Warning   Unhealthy           pod/calculator-59ffff7d99-ppcgv    Liveness probe failed: Get "http://10.244.0.18:8080/healthz": readLoopPeekFailLocked: %!w(<nil>)
+2m2s        Warning   Unhealthy           pod/calculator-59ffff7d99-p5rp5    Liveness probe failed: HTTP probe failed with statuscode: 503
+114s        Warning   Unhealthy           pod/calculator-59ffff7d99-p5rp5    Readiness probe failed: Get "http://10.244.0.21:8080/readyz": dial tcp 10.244.0.21:8080: connect: connection refused
+92s         Warning   Unhealthy           pod/calculator-59ffff7d99-ppcgv    Liveness probe failed: HTTP probe failed with statuscode: 503
+88s         Warning   Unhealthy           pod/calculator-59ffff7d99-ppcgv    Readiness probe failed: HTTP probe failed with statuscode: 503
+72s         Normal    Killing             pod/calculator-59ffff7d99-ppcgv    Container calculator failed liveness probe, will be restarted
+22s         Normal    Killing             pod/calculator-59ffff7d99-p5rp5    Container calculator failed liveness probe, will be restarted
+20s         Warning   Unhealthy           pod/calculator-59ffff7d99-p5rp5    Readiness probe failed: HTTP probe failed with statuscode: 503
+
+$ prometheus alerts
+CalculatorDegraded pending since 2026-10-17T23:43:42.71915332Z | Fewer pods available than desired. One more failure is an outage.
+CalculatorErrorBudgetBurn pending since 2026-10-17T23:43:42.71915332Z | More than 1% of requests are failing with 5xx (28.38%).
+
+# Result after 7 minutes
+$ deploy/load.py summary
+ok=3850 failed=680 versions_seen={'842cabacef37': 3850}
+failure types:
+ 195 ConnectionResetError: Connection reset by peer
+ 482 HTTPError: HTTP Error 503: Service Unavailable
+   3 TimeoutError: timed out
+$ kubectl -n calculator get pods
+NAME                          READY   STATUS    RESTARTS        AGE
+calculator-59ffff7d99-p5rp5   1/1     Running   5 (2m30s ago)   10m
+calculator-59ffff7d99-ppcgv   1/1     Running   3 (30s ago)     12m
+$ prometheus alerts
+CalculatorDegraded pending since 2026-10-17T23:45:42.71915332Z
+CalculatorErrorBudgetBurn firing since 2026-10-17T23:43:42.71915332Z

@@ -1,0 +1,25 @@
+# Same drill as saturation-before-fix.txt, on a7e33ef (probes on admin port 8081). Started 00:54:07Z
+$ deploy/load.py summary
+ok=104 failed=6821 versions_seen={'a7e33ef4d8be': 104}
+failure types:
+6821 HTTPError: HTTP Error 503: Service Unavailable
+$ kubectl -n calculator get pods   (restarts?)
+NAME                          READY   STATUS    RESTARTS   AGE
+calculator-6c45478f87-8ddtz   1/1     Running   0          8m15s
+calculator-6c45478f87-zkvcq   1/1     Running   0          8m15s
+$ probe failures / kills during drill
+8m15s       Warning   Unhealthy           pod/calculator-6c45478f87-8ddtz    Readiness probe failed: Get "http://10.244.0.11:8081/readyz": dial tcp 10.244.0.11:8081: connect: connection refused
+8m15s       Warning   Unhealthy           pod/calculator-6c45478f87-zkvcq    Readiness probe failed: Get "http://10.244.0.12:8081/readyz": dial tcp 10.244.0.12:8081: connect: connection refused
+$ prometheus alerts
+CalculatorErrorBudgetBurn firing since 2026-10-18T00:54:32.806519133Z | More than 1% of requests are failing with 5xx (96.54%).
+$ promql: max_over_time(calc_open_connections[10m]) per pod
+   calculator-6c45478f87-8ddtz 64
+   calculator-6c45478f87-zkvcq 64
+
+# Recovery: drill stopped at ~01:01Z; alert resolved at 01:06:38Z
+$ prometheus alerts (calculator)
+  (none active)
+$ promql: calc:errors:ratio5m
+   0
+$ make smoke
+smoke ok: http://localhost:30080 serves a7e33ef4d8bef2745f88303b8aa6c7e376a26d6b

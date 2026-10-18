@@ -1,0 +1,6 @@
+killing pod/calculator-5cbc68f484-8rg4t
+Warning: Immediate deletion does not wait for confirmation that the running resource has been terminated. The resource may continue to run on the cluster indefinitely.
+pod "calculator-5cbc68f484-8rg4t" force deleted from calculator namespace
+NAME                          READY   STATUS    RESTARTS   AGE
+calculator-5cbc68f484-cgqdj   1/1     Running   0          15s
+calculator-5cbc68f484-fm94l   1/1     Running   0          2m45s

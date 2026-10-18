@@ -15,15 +15,15 @@ deployed to Kubernetes, and observed.
 
 | Area | Where |
 |---|---|
-| `/healthz` `/readyz` `/version` `/metrics`, JSON logs, W3C trace ids, graceful SIGTERM drain | `server.py` |
+| `/healthz` `/readyz` `/version` `/metrics` (probes and metrics on admin port 8081), JSON logs, W3C trace ids, graceful SIGTERM drain | `server.py` |
 | Distroless non-root image, version baked in | `Dockerfile` |
-| Helm chart: Deployment (2 replicas, probes, resources, hardened securityContext), NodePort Service, PDB, NetworkPolicy, ServiceMonitor, SLO alert rules, Grafana dashboard | `chart/calculator/` |
+| Helm chart: Deployment (2 replicas, probes, resources, hardened securityContext), NodePort Service, PDB, NetworkPolicy, PodMonitor, SLO alert rules, Grafana dashboard | `chart/calculator/` |
 | CI: lint, protocol tests, helm lint, kubeconform, Trivy config + image scans, deploy to kind, smoke test, then publish to GHCR | `.github/workflows/ci.yml` |
 | Local cluster, monitoring stack, deploy / rollback / drift / status targets | `Makefile`, `deploy/` |
 
 ## Run it
 
-**Prerequisites:** Docker (2 GB of memory is enough), `kind` ≥ 0.24, `kubectl`, `helm` 4,
+**Prerequisites:** Docker with **4 GB** of memory (at 2 GB the node OOMs once Grafana and Prometheus are running), `kind` ≥ 0.24, `kubectl`, `helm` 4,
 `make`, `curl`, Python 3. On macOS: `brew install kind helm kubectl`.
 
 ```bash
@@ -69,6 +69,10 @@ make down             # delete the cluster
 - Tracing is trace-id propagation and log correlation, with no span export.
   There is a single hop.
 - No TLS: plain HTTP on localhost.
+- One client holding many idle keep-alive connections can fill every pod's
+  64-connection ceiling, and everyone else then gets a 503. Saturation no
+  longer restarts pods, but capacity can still be monopolised. The fix is
+  described in RUNBOOK.md, "Drill: saturation".
 
 ---
 
